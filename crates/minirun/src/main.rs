@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use nix::mount::{mount, MsFlags};
 use nix::sched::{unshare, CloneFlags};
 use nix::unistd::sethostname;
 use std::io;
@@ -47,23 +48,47 @@ fn main() {
     }
 }
 
-/// Start the command in new PID + UTS namespaces.
+/// Start the command in new PID + UTS + mount namespaces, with its own /proc.
 fn run(cmd: &[String], hostname: String) -> i32 {
     println!("[minirun] parent pid (host) = {}", std::process::id());
 
-    // PID namespace: called in the PARENT.
-    // It does not move us; our NEXT child becomes PID 1 of a new namespace.
+    // PID namespace: called in the PARENT, affects our NEXT child.
     unshare(CloneFlags::CLONE_NEWPID)
         .expect("unshare(CLONE_NEWPID) failed - did you use sudo?");
 
     let mut command = Command::new(&cmd[0]);
     command.args(&cmd[1..]);
 
-    // UTS namespace: called in the CHILD, after clone and before execve.
+    // Runs in the CHILD (already PID 1 of the new PID namespace), before execve.
     unsafe {
         command.pre_exec(move || {
-            unshare(CloneFlags::CLONE_NEWUTS).map_err(io::Error::from)?;
+            // 1. New hostname + new mount table
+            unshare(CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS)
+                .map_err(io::Error::from)?;
+
+            // 2. Hostname
             sethostname(&hostname).map_err(io::Error::from)?;
+
+            // 3. Make every mount private so nothing leaks back to the host
+            mount(
+                None::<&str>,
+                "/",
+                None::<&str>,
+                MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                None::<&str>,
+            )
+            .map_err(io::Error::from)?;
+
+            // 4. Fresh /proc that reflects OUR PID namespace
+            mount(
+                Some("proc"),
+                "/proc",
+                Some("proc"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                None::<&str>,
+            )
+            .map_err(io::Error::from)?;
+
             Ok(())
         });
     }
