@@ -47,14 +47,19 @@ fn main() {
     }
 }
 
-/// Start the command in a new UTS namespace with its own hostname.
+/// Start the command in new PID + UTS namespaces.
 fn run(cmd: &[String], hostname: String) -> i32 {
-    println!("[minirun] parent pid = {}", std::process::id());
+    println!("[minirun] parent pid (host) = {}", std::process::id());
+
+    // PID namespace: called in the PARENT.
+    // It does not move us; our NEXT child becomes PID 1 of a new namespace.
+    unshare(CloneFlags::CLONE_NEWPID)
+        .expect("unshare(CLONE_NEWPID) failed - did you use sudo?");
 
     let mut command = Command::new(&cmd[0]);
     command.args(&cmd[1..]);
 
-    // Runs in the CHILD, after clone3 and before execve.
+    // UTS namespace: called in the CHILD, after clone and before execve.
     unsafe {
         command.pre_exec(move || {
             unshare(CloneFlags::CLONE_NEWUTS).map_err(io::Error::from)?;
